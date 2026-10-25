@@ -2,6 +2,10 @@ package com.rampey.materialtv;
 
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.SharedPreferences;
+import android.os.Bundle;
+import java.util.ArrayList;
+import java.util.List;
 import android.database.Cursor;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
@@ -28,12 +32,90 @@ final class InfoLines {
         }
     }
 
-    /** Off the main thread. Null when the companion is missing or has no reading yet. */
-    static Weather weather(ContentResolver cr) {
+    /** A city the companion found for a typed name. */
+    static final class City {
+        final String label, name, zone;
+        final double lat, lon;
+
+        City(String label, String name, double lat, double lon, String zone) {
+            this.label = label;
+            this.name = name;
+            this.lat = lat;
+            this.lon = lon;
+            this.zone = zone;
+        }
+    }
+
+    /** Where the times and the weather are for, kept so the first screen after a restart already has it. */
+    static void loadPlace(Context context) {
+        SharedPreferences p = context.getSharedPreferences("place", Context.MODE_PRIVATE);
+        if (p.contains("lat")) PrayerTimes.configure(p.getString("name", "Kota Batu"), Double.longBitsToDouble(p.getLong("lat", 0)),
+                Double.longBitsToDouble(p.getLong("lon", 0)), p.getString("zone", "Asia/Jakarta"));
+    }
+
+    private static void savePlace(Context context, String name, double lat, double lon, String zone) {
+        PrayerTimes.configure(name, lat, lon, zone);
+        context.getSharedPreferences("place", Context.MODE_PRIVATE).edit().putString("name", name)
+                .putLong("lat", Double.doubleToRawLongBits(lat)).putLong("lon", Double.doubleToRawLongBits(lon))
+                .putString("zone", zone).apply();
+    }
+
+    /** Off the main thread: "auto" or "manual", as the companion has it; also the detected place. Null if there is no companion. */
+    static String detect(Context context) {
+        try {
+            context.getContentResolver().call(WEATHER_URI, "detect", null, null);
+            return mode(context);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Off the main thread: cities matching the text. */
+    static List<City> search(Context context, String text) {
+        List<City> found = new ArrayList<>();
+        try {
+            Bundle b = context.getContentResolver().call(WEATHER_URI, "search", text, null);
+            if (b == null) return found;
+            ArrayList<String> labels = b.getStringArrayList("labels"), names = b.getStringArrayList("names"), zones = b.getStringArrayList("zones");
+            double[] lats = b.getDoubleArray("lats"), lons = b.getDoubleArray("lons");
+            for (int i = 0; labels != null && i < labels.size(); i++) found.add(new City(labels.get(i), names.get(i), lats[i], lons[i], zones.get(i)));
+        } catch (Exception ignored) {
+        }
+        return found;
+    }
+
+    /** Off the main thread: use this city from now on (manual). */
+    static void setCity(Context context, City city) {
+        try {
+            Bundle extras = new Bundle();
+            extras.putString("name", city.name);
+            extras.putDouble("lat", city.lat);
+            extras.putDouble("lon", city.lon);
+            extras.putString("zone", city.zone);
+            context.getContentResolver().call(WEATHER_URI, "set", null, extras);
+            savePlace(context, city.name, city.lat, city.lon, city.zone);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** "auto" or "manual"; "auto" when the companion cannot be reached. */
+    static String mode(Context context) {
+        try (Cursor c = context.getContentResolver().query(WEATHER_URI, null, null, null, null)) {
+            if (c != null && c.moveToFirst() && c.getColumnCount() > 11) return c.getString(11);
+        } catch (Exception ignored) {
+        }
+        return "auto";
+    }
+
+    /** Off the main thread. Null when the companion is missing; a Weather with empty text when it has no reading yet. */
+    static Weather weather(Context context) {
+        ContentResolver cr = context.getContentResolver();
         try {
             cr.call(WEATHER_URI, "refresh", null, null);
             try (Cursor c = cr.query(WEATHER_URI, null, null, null, null)) {
                 if (c == null || !c.moveToFirst()) return null;
+                if (c.getColumnCount() > 10) savePlace(context, c.getString(7), c.getDouble(8), c.getDouble(9), c.getString(10));
+                if (c.isNull(0)) return new Weather("", 0);
                 String text = c.getString(1);
                 // Rain on the way takes the place of the condition, so the line keeps its length.
                 String soon = c.getColumnCount() > 6 ? rainWarning(c.getInt(3), c.getLong(6)) : "";
@@ -52,6 +134,15 @@ final class InfoLines {
     static CharSequence prayerLine(Context context, long now, int tint, int iconPx) {
         String[] sun = PrayerTimes.nextSun(now);
         SpannableStringBuilder line = new SpannableStringBuilder(PrayerTimes.nextLabel(now));
+        int jumuah = line.toString().indexOf("Jumuah");
+        Drawable mosque = jumuah < 0 ? null : context.getDrawable(R.drawable.ic_mosque);
+        if (mosque != null) {   // "Next Salah — [mosque] Jumuah in 1h 35m"
+            mosque = mosque.mutate();
+            mosque.setBounds(0, 0, iconPx, iconPx);
+            mosque.setTint(tint);
+            line.insert(jumuah, "  ");
+            line.setSpan(new ImageSpan(mosque, ImageSpan.ALIGN_BOTTOM), jumuah, jumuah + 1, 0);
+        }
         Drawable icon = context.getDrawable("rise".equals(sun[0]) ? R.drawable.ic_wx_sunrise : R.drawable.ic_wx_sunset);
         line.append("  ·  ");
         if (icon != null) {

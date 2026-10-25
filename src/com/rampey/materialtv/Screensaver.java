@@ -60,6 +60,8 @@ public class Screensaver extends DreamService {
     private FrameLayout root;
     private ShapeScene scene;
     private View scrim;
+    private View nightDim;
+    private ValueAnimator dimAnimator;
     private ImageView photoA, photoB;
     private boolean frontIsA;
     private ValueAnimator zoom;
@@ -104,7 +106,8 @@ public class Screensaver extends DreamService {
             long minute = d.getTime() / 60_000L;
             if (minute != lastMinute) {
                 lastMinute = minute;
-                date.setText(new SimpleDateFormat("EEEE, MMMM d", Locale.getDefault()).format(d));
+                date.setText(new SimpleDateFormat("EEE, MMM d", Locale.getDefault()).format(d) + "  \u00B7  " + PrayerTimes.hijri(d.getTime())
+                        + "  \u00B7  " + PrayerTimes.placeName());
                 prayer.setText(InfoLines.prayerLine(Screensaver.this, d.getTime(), mutedNow, dp(20)));
             }
             if (System.currentTimeMillis() - weatherAt > 10 * 60_000L && weatherBusy.compareAndSet(false, true)) {
@@ -112,6 +115,7 @@ public class Screensaver extends DreamService {
                 new Thread(Screensaver.this::refreshWeather, "weather").start();
             }
             updateSong();
+            updateNightDim(d.getTime());
             handler.postDelayed(this, 1000 - (System.currentTimeMillis() % 1000) + 5);
         }
     };
@@ -139,6 +143,7 @@ public class Screensaver extends DreamService {
         setFullscreen(true);
         hue = (System.currentTimeMillis() / 1000L) % 360;
         seed = System.currentTimeMillis();
+        InfoLines.loadPlace(this);
         setContentView(build());
     }
 
@@ -177,6 +182,12 @@ public class Screensaver extends DreamService {
         scrim.setVisibility(View.GONE);
         root.addView(scrim, match());
 
+        // Night dim: darkens the background as the sun goes down, under the text.
+        nightDim = new View(this);
+        nightDim.setBackgroundColor(0xFF000000);
+        nightDim.setAlpha(nightMax() * PrayerTimes.nightLevel(System.currentTimeMillis()));
+        root.addView(nightDim, match());
+
         // The same block, sizes and padding as the top-left of Home.
         block = new LinearLayout(this);
         block.setOrientation(LinearLayout.VERTICAL);
@@ -185,6 +196,7 @@ public class Screensaver extends DreamService {
         clock.setIncludeFontPadding(false);
         date = text(15, mutedNow, AXES);
         date.setPadding(dp(2), dp(2), 0, 0);
+        date.setGravity(Gravity.CENTER_VERTICAL);
         weather = text(15, mutedNow, AXES);
         weather.setPadding(dp(2), dp(4), 0, 0);
         weather.setGravity(Gravity.CENTER_VERTICAL);
@@ -268,6 +280,20 @@ public class Screensaver extends DreamService {
         }, "photo").start();
     }
 
+    /** The darkness chosen in Launcher Settings; it dims the photos or wallpaper only, never the text. */
+    private float nightMax() {
+        return getSharedPreferences("home", MODE_PRIVATE).getInt("dim", 40) / 100f;
+    }
+
+    private void updateNightDim(long now) {
+        float target = nightMax() * PrayerTimes.nightLevel(now);
+        if (Math.abs(nightDim.getAlpha() - target) < 0.004f) return;
+        if (dimAnimator != null) dimAnimator.cancel();
+        dimAnimator = ValueAnimator.ofFloat(nightDim.getAlpha(), target).setDuration(4000);
+        dimAnimator.addUpdateListener(a -> nightDim.setAlpha((float) a.getAnimatedValue()));
+        dimAnimator.start();
+    }
+
     private void showPhoto(Bitmap b) {
         final ImageView in = frontIsA ? photoB : photoA, out = frontIsA ? photoA : photoB;
         frontIsA = !frontIsA;
@@ -279,6 +305,7 @@ public class Screensaver extends DreamService {
         in.setScaleY(1f);
         in.bringToFront();
         scrim.bringToFront();
+        nightDim.bringToFront();
         block.bringToFront();
         out.animate().alpha(0f).setDuration(FADE_MS).withEndAction(() -> {
             if (out.getAlpha() == 0f) {
@@ -383,7 +410,7 @@ public class Screensaver extends DreamService {
 
     /** Off the main thread: the companion's weather reading; nothing shows if it has none. */
     private void refreshWeather() {
-        InfoLines.Weather w = InfoLines.weather(getContentResolver());
+        InfoLines.Weather w = InfoLines.weather(Screensaver.this);
         weatherBusy.set(false);
         handler.post(() -> {
             if (w == null || w.text.isEmpty()) return;

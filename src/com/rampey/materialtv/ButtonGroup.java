@@ -133,8 +133,9 @@ final class ButtonGroup extends LinearLayout {
         TextView b = buttons.get(index);
         boolean focused = b.hasFocus();
         boolean on = index == selected && selectable[index];
-        int fill = focused ? palette.inverseSurface : on ? palette.primary : Color.TRANSPARENT;
-        int ink = focused ? palette.inverseOnSurface : on ? palette.onPrimary : palette.onSurfaceVariant;
+        // The selected tab is quiet (a tonal fill) until focus is on it; only the focused button gets the bright fill.
+        int fill = focused ? palette.inverseSurface : on ? palette.containerHigh : Color.TRANSPARENT;
+        int ink = focused ? palette.inverseOnSurface : on ? palette.onSurface : palette.onSurfaceVariant;
         b.setTextColor(ink);
         for (Drawable d : b.getCompoundDrawablesRelative()) if (d != null) d.setTintList(ColorStateList.valueOf(ink));
         GradientDrawable bg = b.getBackground() instanceof GradientDrawable ? (GradientDrawable) b.getBackground() : null;

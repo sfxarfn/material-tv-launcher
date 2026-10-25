@@ -122,6 +122,9 @@ public class HomeActivity extends Activity {
     private TextView date;
     private TextView prayer;
     private TextView weather;
+    private View nightDim;
+    private ValueAnimator dimAnimator;
+    private static final int[] DIM_LEVELS = {0, 20, 40, 60};   // % black at full night; the choice is kept in the "home" prefs
     private ButtonGroup nav;
     private ButtonGroup settingsPill;
     private View topFade;   // fade in the dark background colour over the top of the Apps page while it is scrolled
@@ -289,9 +292,10 @@ public class HomeActivity extends Activity {
                 changeClock(time);
             }
             int sleepLeft = sleepLeft();
-            date.setText(new SimpleDateFormat("EEEE, MMMM d", Locale.getDefault()).format(now)
-                    + (sleepLeft > 0 ? "  ·  Sleeps in " + formatLeft(sleepLeft) : ""));
+            date.setText(new SimpleDateFormat("EEE, MMM d", Locale.getDefault()).format(now) + "  \u00B7  " + PrayerTimes.hijri(now.getTime())
+                    + "  \u00B7  " + PrayerTimes.placeName() + (sleepLeft > 0 ? "  \u00B7  Sleep " + formatLeft(sleepLeft) : ""));
             settingsPill.setLabel(1, sleepLeft > 0 ? formatLeft(sleepLeft) : "");
+            updateNightDim(now.getTime());
             prayer.setText(InfoLines.prayerLine(HomeActivity.this, now.getTime(), palette.onSurfaceVariant, dp(20)));
             handler.postDelayed(this, sleepLeft > 0 ? 1_000 : 15_000);   // every second while a sleep countdown shows
         }
@@ -300,6 +304,7 @@ public class HomeActivity extends Activity {
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         pm = getPackageManager();
+        InfoLines.loadPlace(this);
         setContentView(buildRoot());
     }
 
@@ -317,6 +322,11 @@ public class HomeActivity extends Activity {
         handler.removeCallbacks(prebuildApps);
         handler.postDelayed(prebuildApps, 1500);
         foreground = true;
+        // onPause drops a pending focus colour; bring it back, or the screen keeps the default purple until focus moves.
+        if (pendingPkg != null) {
+            handler.removeCallbacks(settle);
+            handler.postDelayed(settle, 120);
+        }
         handler.removeCallbacks(camTick);
         handler.post(camTick);
         handler.removeCallbacks(weatherTick);
@@ -366,6 +376,7 @@ public class HomeActivity extends Activity {
 
 
     @Override public void onBackPressed() {
+        if (panelBack()) return;
         if (showingApps) showHome();
     }
 
@@ -381,6 +392,7 @@ public class HomeActivity extends Activity {
 
     private View buildRoot() {
         FrameLayout root = new FrameLayout(this);
+        rootFrame = root;
         backdrop = new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{palette.surfaceBright, palette.surface});
         root.setBackground(backdrop);
 
@@ -464,8 +476,47 @@ public class HomeActivity extends Activity {
             }
         });
         appsPage.setOnScrollChangeListener((v, x, y, ox, oy) -> topFade.setAlpha(Math.min(1f, y / (float) dp(70))));
+        // Night dim: a black veil over everything, as deep as the sun is low (see PrayerTimes.nightLevel).
+        nightDim = new View(this);
+        nightDim.setBackgroundColor(0xFF000000);
+        nightDim.setAlpha(nightMax() * PrayerTimes.nightLevel(System.currentTimeMillis()));
+        nightDim.setFocusable(false);
+        root.addView(nightDim, match());
         return root;
     }
+
+    /** Ease the night dim to where the sun puts it now; called from the clock tick, so it follows dusk and dawn. */
+    private void updateNightDim(long now) {
+        if (dimPreview) return;
+        fadeDimTo(nightMax() * PrayerTimes.nightLevel(now), 4000);
+    }
+
+    private void fadeDimTo(float target, long ms) {
+        if (Math.abs(nightDim.getAlpha() - target) < 0.004f) return;
+        if (dimAnimator != null) dimAnimator.cancel();
+        dimAnimator = ValueAnimator.ofFloat(nightDim.getAlpha(), target).setDuration(ms);
+        dimAnimator.setInterpolator(Motion.DEFAULT_EFFECTS);
+        dimAnimator.addUpdateListener(a -> nightDim.setAlpha((float) a.getAnimatedValue()));
+        dimAnimator.start();
+    }
+
+    /** The chosen darkness at full night, 0 to 0.6. */
+    private float nightMax() {
+        return getSharedPreferences("home", MODE_PRIVATE).getInt("dim", 40) / 100f;
+    }
+
+    private boolean dimPreview;
+
+    /** Show a level at full strength while its row is highlighted, whatever the time of day. Leaving the page without picking undoes it. */
+    private void previewDim(int percent) {
+        dimPreview = true;
+        fadeDimTo(percent / 100f, 500);
+    }
+
+    private final Runnable endDimPreview = () -> {
+        dimPreview = false;
+        updateNightDim(System.currentTimeMillis());
+    };
 
     private View buildTopBar() {
         FrameLayout bar = new FrameLayout(this);
@@ -481,6 +532,7 @@ public class HomeActivity extends Activity {
         when.addView(clock);
         date = text("", 15, palette.onSurfaceVariant, 500);
         date.setPadding(dp(2), dp(2), 0, 0);
+        date.setGravity(Gravity.CENTER_VERTICAL);
         when.addView(date);
         weather = text("", 15, palette.onSurfaceVariant, 500);
         weather.setPadding(dp(2), dp(4), 0, 0);
@@ -509,12 +561,12 @@ public class HomeActivity extends Activity {
         nav.button(1).setId(View.generateViewId());   // Up from the first row of apps lands here, not on Home
         settingsPill = new ButtonGroup(this, font(600), palette,
                 new String[]{"", "", "Settings"},
-                new int[]{R.drawable.ic_input_tv, R.drawable.ic_timer, R.drawable.ic_settings},
+                new int[]{R.drawable.ic_cable, R.drawable.ic_timer, R.drawable.ic_settings},
                 new boolean[]{false, false, false},
                 index -> {
                     if (index == 0) showInputsMenu(settingsPill.button(0));
                     else if (index == 1) showSleepMenu(settingsPill.button(1));
-                    else launch(new Intent(Settings.ACTION_SETTINGS));
+                    else showSettingsMenu(settingsPill.button(2));
                 });
         settingsPill.evenGaps();
         settingsPill.button(0).setContentDescription("Inputs");
@@ -932,14 +984,15 @@ public class HomeActivity extends Activity {
             float scale = focused ? 1.10f : 1f;
             ringFrame.animate().scaleX(scale).scaleY(scale)
                     .setInterpolator(Motion.FAST_SPATIAL).setDuration(Motion.FAST_SPATIAL_MS).start();
-            // A glow in the app's own color (TV focus guidance) instead of a dark shadow.
-            card.setOutlineSpotShadowColor(palette.primary);
-            card.setOutlineAmbientShadowColor(palette.primary);
+            card.setOutlineSpotShadowColor(Color.TRANSPARENT);   // no cast shadow: it peeked out at the bottom corners with a hard edge
+            card.setOutlineAmbientShadowColor(Color.TRANSPARENT);
             card.animate().translationZ(focused ? dp(14) : 0)
                     .setInterpolator(Motion.FAST_EFFECTS).setDuration(Motion.DEFAULT_EFFECTS_MS).start();
             ObjectAnimator corners = ObjectAnimator.ofFloat(cardShape, "cornerRadius", cardShape.getCornerRadius(), focused ? radius * 0.62f : radius)
                     .setDuration(Motion.FAST_SPATIAL_MS);
             corners.setInterpolator(Motion.FAST_SPATIAL);
+            // The clip follows the background's outline; without this it keeps the old, rounder corners and the card shows through.
+            corners.addUpdateListener(an -> card.invalidateOutline());
             corners.start();
             ring.setCornerRadius((focused ? radius * 0.62f : radius) + dp(RING));
             fadeRing(ring, focused);
@@ -1368,12 +1421,209 @@ public class HomeActivity extends Activity {
         }
     }
 
-    private static final int[] SLEEP_MINUTES = {0, 10, 15, 20, 25, 30, 45, 60};
+    private static final int[] SLEEP_MINUTES = {0, 15, 20, 25, 30, 45, 60};
 
     private void setSleep(int seconds) {
         if (!HomeKeyService.setSleep(seconds)) launch(new Intent(Settings.ACTION_SETTINGS));   // helper service off: use the TV's own timer
         handler.removeCallbacks(tick);
         handler.post(tick);
+    }
+
+    /** Settings: the launcher's own settings, or Android's. */
+    private void showSettingsMenu(View anchor) {
+        LinearLayout menu = newMenu();
+        PopupWindow pw = newPopup(menu);
+        addOption(menu, pw, "Launcher Settings", this::showLauncherSettings);
+        addOption(menu, pw, "System Settings", () -> launch(new Intent(Settings.ACTION_SETTINGS)));
+        presentMenu(anchor, menu, pw, null);
+    }
+
+    // ---- Launcher Settings: a right-hand panel in the style of the TV's own Settings ----
+
+    private static final class Row {
+        final String title, sub;
+        final boolean checked;
+        final Runnable action, onFocus;   // onFocus: when the row is highlighted (null for none)
+
+        Row(String title, String sub, boolean checked, Runnable action, Runnable onFocus) {
+            this.title = title;
+            this.sub = sub;
+            this.checked = checked;
+            this.action = action;
+            this.onFocus = onFocus;
+        }
+    }
+
+    private FrameLayout rootFrame, settingsPanel;
+    private LinearLayout panelRows;
+    private TextView panelTitle;
+    private int panelPage;   // 0 closed, 1 launcher settings, 2 night dim
+
+    private static String dimLabel(int percent) {
+        return percent == 0 ? "Off" : percent == 20 ? "Light" : percent == 40 ? "Medium" : "Strong";
+    }
+
+    private void showLauncherSettings() {
+        dismissOptions();
+        if (settingsPanel == null) {
+            settingsPanel = new FrameLayout(this);
+            settingsPanel.setBackgroundColor(0xFF202124);
+            settingsPanel.setElevation(dp(16));
+            LinearLayout column = new LinearLayout(this);
+            column.setOrientation(LinearLayout.VERTICAL);
+            panelTitle = text("", 24, 0xFFFFFFFF, 760);
+            panelTitle.setGravity(Gravity.CENTER_VERTICAL);
+            panelTitle.setPadding(dp(24), 0, dp(24), 0);
+            panelTitle.setBackgroundColor(0xFF1A1B1E);
+            column.addView(panelTitle, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(88)));
+            panelRows = new LinearLayout(this);
+            panelRows.setOrientation(LinearLayout.VERTICAL);
+            column.addView(panelRows, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            settingsPanel.addView(column, match());
+        }
+        boolean opening = panelPage == 0;
+        panelPage = 1;
+        int dim = getSharedPreferences("home", MODE_PRIVATE).getInt("dim", 40);
+        java.util.List<Row> main = new ArrayList<>();
+        main.add(new Row("Night dim", dim == 0 ? "Off" : dimLabel(dim) + " \u00B7 " + dim + "%", false, this::showNightDimPage, null));
+        main.add(new Row("Location", ("auto".equals(InfoLines.mode(this)) ? "Automatic \u00B7 " : "") + PrayerTimes.placeName(), false, this::showLocationPage, null));
+        showPanelRows("Launcher settings", main, 0, false);
+        endDimPreview.run();   // back from Night dim (or just opened): the dim follows the sun again
+        if (opening) {
+            rootFrame.addView(settingsPanel, new FrameLayout.LayoutParams(dp(360), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END));
+            settingsPanel.setTranslationX(dp(360));
+            settingsPanel.animate().translationX(0).setInterpolator(Motion.DEFAULT_SPATIAL).setDuration(Motion.DEFAULT_SPATIAL_MS).start();
+        }
+    }
+
+    private void showNightDimPage() {
+        panelPage = 2;
+        int current = getSharedPreferences("home", MODE_PRIVATE).getInt("dim", 40);
+        java.util.List<Row> rows = new ArrayList<>();
+        int at = 0;
+        for (int i = 0; i < DIM_LEVELS.length; i++) {
+            final int percent = DIM_LEVELS[i];
+            if (percent == current) at = i;
+            rows.add(new Row(dimLabel(percent), percent == 0 ? null : percent + "% at full night", percent == current, () -> {
+                getSharedPreferences("home", MODE_PRIVATE).edit().putInt("dim", percent).apply();
+                showLauncherSettings();
+            }, () -> previewDim(percent)));
+        }
+        showPanelRows("Night dim", rows, at, false);
+    }
+
+    /** Where the weather and the prayer times are for: found from this TV's IP address, or a city you search for. */
+    private void showLocationPage() {
+        panelPage = 3;
+        boolean auto = "auto".equals(InfoLines.mode(this));
+        java.util.List<Row> rows = new ArrayList<>();
+        rows.add(new Row("Detect automatically", "From this TV's IP address" + (auto ? " \u00B7 " + PrayerTimes.placeName() : ""), auto, () -> {
+            new Thread(() -> {
+                InfoLines.detect(this);
+                weatherRefresh();
+                runOnUiThread(() -> { if (panelPage == 3) showLocationPage(); });
+            }, "detect").start();
+        }, null));
+        rows.add(new Row("Search for a city", auto ? "Type a city name" : PrayerTimes.placeName(), !auto, () -> showSearchPage("", null), null));
+        showPanelRows("Location", rows, auto ? 0 : 1, false);
+    }
+
+    private void showSearchPage(String typed, java.util.List<InfoLines.City> results) {
+        panelPage = 4;
+        java.util.List<Row> rows = new ArrayList<>();
+        if (results != null) {
+            for (InfoLines.City city : results) {
+                rows.add(new Row(city.label, null, false, () -> new Thread(() -> {
+                    InfoLines.setCity(this, city);
+                    weatherRefresh();
+                    runOnUiThread(() -> { if (panelPage == 4) showLocationPage(); });
+                }, "city").start(), null));
+            }
+            if (results.isEmpty()) rows.add(new Row("No city found", "Try another name", false, () -> { }, null));
+        }
+        showPanelRows("Search for a city", rows, 0, true);
+        android.widget.EditText box = new android.widget.EditText(this);
+        box.setText(typed);
+        box.setHint("Type a city name");
+        box.setHintTextColor(0xFF9AA0A6);
+        box.setTextColor(0xFFE8EAED);
+        box.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        box.setTypeface(font(560));
+        box.setSingleLine(true);
+        box.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
+        box.setBackgroundColor(0xFF2E3033);
+        box.setPadding(dp(24), dp(16), dp(24), dp(16));
+        box.setOnEditorActionListener((v, action, event) -> {
+            String q = v.getText().toString();
+            new Thread(() -> {
+                java.util.List<InfoLines.City> found = InfoLines.search(this, q);
+                runOnUiThread(() -> { if (panelPage == 4) showSearchPage(q, found); });
+            }, "search").start();
+            return true;
+        });
+        // Focus stays in the panel: Left and Right do nothing here (typing uses the keyboard).
+        box.setOnKeyListener((v, keyCode, event) -> event.getAction() == KeyEvent.ACTION_DOWN
+                && (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                || (keyCode == KeyEvent.KEYCODE_DPAD_UP)));
+        panelRows.addView(box, 0, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        box.requestFocus();
+    }
+
+    private void showPanelRows(String title, java.util.List<Row> rows, int focusAt, boolean openTop) {
+        panelTitle.setText(title);
+        panelRows.removeAllViews();
+        for (int i = 0; i < rows.size(); i++) {
+            final Row r = rows.get(i);
+            final int index = i;
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(24), dp(14), dp(24), dp(14));
+            row.setFocusable(true);
+            row.setClickable(true);
+            LinearLayout words = new LinearLayout(this);
+            words.setOrientation(LinearLayout.VERTICAL);
+            words.addView(text(r.title, 18, 0xFFE8EAED, 560));
+            if (r.sub != null) {
+                TextView sub = text(r.sub, 14, 0xFF9AA0A6, 500);
+                sub.setPadding(0, dp(2), 0, 0);
+                words.addView(sub);
+            }
+            row.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            if (r.checked) row.addView(text("\u2713", 20, 0xFFE8EAED, 760));
+            row.setBackgroundColor(Color.TRANSPARENT);
+            row.setOnFocusChangeListener((v, focused) -> {
+                row.setBackgroundColor(focused ? 0xFF3C4043 : Color.TRANSPARENT);
+                if (focused && r.onFocus != null) r.onFocus.run();
+            });
+            row.setOnClickListener(v -> r.action.run());
+            // Focus stays inside the panel: Left and Right do nothing, and Up and Down stop at the ends.
+            row.setOnKeyListener((v, keyCode, event) -> event.getAction() == KeyEvent.ACTION_DOWN
+                    && (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                    || (keyCode == KeyEvent.KEYCODE_DPAD_UP && index == 0 && !openTop)
+                    || (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && index == rows.size() - 1)));
+            panelRows.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+        if (panelRows.getChildCount() > 0) panelRows.getChildAt(Math.min(focusAt, panelRows.getChildCount() - 1)).requestFocus();
+    }
+
+    /** Back: from Night dim to Launcher settings, from there out of the panel. True when the panel took the key. */
+    private boolean panelBack() {
+        if (panelPage == 0) return false;
+        if (panelPage == 2 || panelPage == 3) {
+            showLauncherSettings();
+            return true;
+        }
+        if (panelPage == 4) {
+            showLocationPage();
+            return true;
+        }
+        panelPage = 0;
+        final FrameLayout p = settingsPanel;
+        p.animate().translationX(dp(360)).setInterpolator(Motion.FAST_EFFECTS).setDuration(Motion.FAST_EFFECTS_MS)
+                .withEndAction(() -> rootFrame.removeView(p)).start();
+        settingsPill.button(2).requestFocus();
+        return true;
     }
 
     private void showSleepMenu(View anchor) {
@@ -1481,7 +1731,7 @@ public class HomeActivity extends Activity {
 
     /** Off the main thread: ask the companion for the current weather. No companion or no reading: the line stays hidden. */
     private void weatherRefresh() {
-        InfoLines.Weather w = InfoLines.weather(getContentResolver());
+        InfoLines.Weather w = InfoLines.weather(HomeActivity.this);
         weatherBusy.set(false);
         handler.post(() -> {
             if (w != null && w.text.length() > 0) weather.setText(w.text);
@@ -1538,13 +1788,15 @@ public class HomeActivity extends Activity {
             float scale = focused ? 1.10f : 1f;
             ringFrame.animate().scaleX(scale).scaleY(scale)
                     .setInterpolator(Motion.FAST_SPATIAL).setDuration(Motion.FAST_SPATIAL_MS).start();
-            card.setOutlineSpotShadowColor(palette.primary);
-            card.setOutlineAmbientShadowColor(palette.primary);
+            card.setOutlineSpotShadowColor(Color.TRANSPARENT);   // no cast shadow: it peeked out at the bottom corners with a hard edge
+            card.setOutlineAmbientShadowColor(Color.TRANSPARENT);
             card.animate().translationZ(focused ? dp(14) : 0)
                     .setInterpolator(Motion.FAST_EFFECTS).setDuration(Motion.DEFAULT_EFFECTS_MS).start();
             ObjectAnimator corners = ObjectAnimator.ofFloat(cardShape, "cornerRadius", cardShape.getCornerRadius(), focused ? radius * 0.62f : radius)
                     .setDuration(Motion.FAST_SPATIAL_MS);
             corners.setInterpolator(Motion.FAST_SPATIAL);
+            // The clip follows the background's outline; without this it keeps the old, rounder corners and the card shows through.
+            corners.addUpdateListener(an -> card.invalidateOutline());
             corners.start();
             ring.setCornerRadius((focused ? radius * 0.62f : radius) + dp(RING));
             fadeRing(ring, focused);

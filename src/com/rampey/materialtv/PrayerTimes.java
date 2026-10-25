@@ -9,13 +9,33 @@ import java.util.TimeZone;
  * minutes per prayer so they match that table for Batu; fitted on 2026-10 and 2026-06, within about a minute of it.
  */
 final class PrayerTimes {
-    private static final double LAT = -7.8672, LON = 112.5239;
-    private static final TimeZone ZONE = TimeZone.getTimeZone("Asia/Jakarta");
-    private static final String[] NAMES = {"Subuh", "Dzuhur", "Ashar", "Maghrib", "Isya"};
-    private static final double[] OFFSET = {2.56, 3.42, 2.47, 7.3, 2.43};
+    // The place the times are for: Kota Batu until the companion app reports another (see configure).
+    private static final double BATU_LAT = -7.8672, BATU_LON = 112.5239;
+    private static final double[] BATU_OFFSET = {2.56, 3.42, 2.47, 7.3, 2.43};   // fitted to the Kemenag table for Batu
+    private static final double[] DEFAULT_OFFSET = {2, 2, 2, 2, 2};            // Kemenag's usual 2 minutes of caution
+    private static final String[] NAMES = {"Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"};
     private static final double RAD = Math.PI / 180;
 
+    private static volatile double LAT = BATU_LAT, LON = BATU_LON;
+    private static volatile TimeZone ZONE = TimeZone.getTimeZone("Asia/Jakarta");
+    private static volatile double[] OFFSET = BATU_OFFSET;
+    private static volatile String place = "Kota Batu";
+
     private PrayerTimes() {
+    }
+
+    /** The place the times are for. Near Kota Batu the fitted offsets apply; anywhere else the standard 2 minutes. */
+    static void configure(String name, double lat, double lon, String zone) {
+        place = name;
+        LAT = lat;
+        LON = lon;
+        ZONE = TimeZone.getTimeZone(zone);
+        double dLat = (lat - BATU_LAT) * 111, dLon = (lon - BATU_LON) * 111 * Math.cos(BATU_LAT * RAD);
+        OFFSET = Math.sqrt(dLat * dLat + dLon * dLon) < 30 ? BATU_OFFSET : DEFAULT_OFFSET;
+    }
+
+    static String placeName() {
+        return place;
     }
 
     /** "Next Salah — Ashar in 43 mins" */
@@ -24,8 +44,10 @@ final class PrayerTimes {
         c.setTimeInMillis(nowMs);
         double nowMin = c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE) + c.get(Calendar.SECOND) / 60.0;
         double[] today = times(c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1, c.get(Calendar.DAY_OF_MONTH));
+        boolean friday = c.get(Calendar.DAY_OF_WEEK) == Calendar.FRIDAY;
         for (int i = 0; i < NAMES.length; i++) {
-            if (today[i] > nowMin) return label(NAMES[i], today[i] - nowMin);
+            // On Friday the midday prayer is Jumuah.
+            if (today[i] > nowMin) return label(i == 1 && friday ? "Jumuah" : NAMES[i], today[i] - nowMin);
         }
         c.add(Calendar.DAY_OF_MONTH, 1);
         double[] tomorrow = times(c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1, c.get(Calendar.DAY_OF_MONTH));
@@ -42,6 +64,43 @@ final class PrayerTimes {
         if (nowMin < today[1]) return new String[]{"set", clock(today[1])};
         c.add(Calendar.DAY_OF_MONTH, 1);
         return new String[]{"rise", clock(sunTimes(c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1, c.get(Calendar.DAY_OF_MONTH))[0])};
+    }
+
+    /**
+     * How night it is, 0 (day) to 1 (full night), following the sun: it eases in from 15 minutes before sunset to
+     * an hour after it, holds through the night, and eases out from an hour before sunrise to 15 minutes after it.
+     */
+    static float nightLevel(long nowMs) {
+        Calendar c = Calendar.getInstance(ZONE);
+        c.setTimeInMillis(nowMs);
+        double now = c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE) + c.get(Calendar.SECOND) / 60.0;
+        double[] t = sunTimes(c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1, c.get(Calendar.DAY_OF_MONTH));
+        double rise = t[0], set = t[1];
+        double x;
+        if (now >= rise + 15 && now <= set - 15) return 0f;
+        if (now < rise + 15) x = 1 - (now - (rise - 60)) / 75;   // dawn: night until an hour before sunrise
+        else x = (now - (set - 15)) / 75;                        // dusk
+        x = Math.max(0, Math.min(1, x));
+        return (float) (x * x * (3 - 2 * x));
+    }
+
+    private static final String[] HIJRI_MONTHS = {"Muh", "Saf", "Rab I", "Rab II", "Jum I", "Jum II", "Raj", "Sha", "Ram", "Syaw", "Dzul Q", "Dzul H"};
+
+    /**
+     * The Hijri date, short: "12 Rab II 1448". The Islamic day starts at sunset, so from Maghrib on it shows the next
+     * day's date. Umm al-Qura calendar (Android's own); Indonesia's Kemenag calendar can differ from it by a day.
+     */
+    static String hijri(long nowMs) {
+        Calendar c = Calendar.getInstance(ZONE);
+        c.setTimeInMillis(nowMs);
+        double nowMin = c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE);
+        double[] t = sunTimes(c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1, c.get(Calendar.DAY_OF_MONTH));
+        if (nowMin >= t[1]) c.add(Calendar.DAY_OF_MONTH, 1);
+        java.time.chrono.HijrahDate h = java.time.chrono.HijrahDate.from(
+                java.time.LocalDate.of(c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1, c.get(Calendar.DAY_OF_MONTH)));
+        return h.get(java.time.temporal.ChronoField.DAY_OF_MONTH) + " "
+                + HIJRI_MONTHS[h.get(java.time.temporal.ChronoField.MONTH_OF_YEAR) - 1] + " "
+                + h.get(java.time.temporal.ChronoField.YEAR_OF_ERA);
     }
 
     /** Minutes after local midnight for sunrise and sunset. */
