@@ -23,7 +23,16 @@
     </queries>
 
     <!-- Per-app screen time, read on the TV only, to order the dock by use (granted over ADB by install.sh). -->
+    <!-- The screensaver's photo slideshow reads the photos in the media store; no photos or no grant: it plays the generated wallpapers. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
+
+    <!-- Lets the long-press menu hand an app to the system uninstaller. -->
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+
+
+    <!-- Reads a still from the optional CCTV companion app (signature permission). No network access here. -->
+    <uses-permission android:name="com.polkka.cctv.permission.SNAPSHOT" />
 
     <application
         android:label="Material TV Launcher"
